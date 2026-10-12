@@ -164,6 +164,17 @@ export const KeepAliveModal: React.FC<KeepAliveModalProps> = ({ onClose, onToast
             </p>
           </div>
 
+          {/* Remix / Copies Explanation Card */}
+          <div className="p-4 bg-sky-950/20 border border-sky-800/40 rounded-xl space-y-2">
+            <div className="flex items-center gap-2 text-sky-400 font-bold text-xs">
+              <Server className="w-4 h-4 shrink-0" />
+              <span>AI Studio Remix (Copies) ke liye Zaroori Jaankari:</span>
+            </div>
+            <p className="text-[11px] text-zinc-300 leading-relaxed">
+              Jab aap AI Studio me <strong>Remix (Copy)</strong> karte hain, toh har copy ka apna ek alag swatantra container aur naya unique URL banta hai (jaise <code>dev-coc6gx...</code> ya <code>pre-coc6gx...</code>). Har nayi copy ko unmineable par 24x7 nonstop chalane ke liye us copy ke andar aakar uska naya <strong>Public Webhook URL</strong> copy karein aur cron-job.org / UptimeRobot me add karein!
+            </p>
+          </div>
+
           {/* Feature: In-Browser Zero Sleep Toggle */}
           <div className="p-4 bg-zinc-950/90 border border-emerald-900/40 rounded-xl space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">

@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+mining_state.json
+mining.log
+xmrig*

