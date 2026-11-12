@@ -46,8 +46,12 @@ export default function App() {
   const [miningStatus, setMiningStatus] = useState<{
     isRunning: boolean;
     powerMode: string;
+    cores?: number;
     threads: number;
     maxCores: number;
+    totalMemoryGB?: string;
+    freeMemoryGB?: string;
+    memoryAllocatedMB?: number;
     startTime: number | null;
     coin?: string;
     network?: string;
@@ -227,8 +231,12 @@ export default function App() {
       setMiningStatus((prev) => ({
         isRunning: status.isRunning,
         powerMode: status.powerMode || "turbo",
-        threads: status.threads || prev?.threads || 4,
-        maxCores: prev?.maxCores || status.threads || 4,
+        cores: status.cores || prev?.cores || status.threads || 2,
+        threads: status.threads || prev?.threads || 2,
+        maxCores: prev?.maxCores || status.threads || 2,
+        totalMemoryGB: status.totalMemoryGB || prev?.totalMemoryGB,
+        freeMemoryGB: status.freeMemoryGB || prev?.freeMemoryGB,
+        memoryAllocatedMB: status.memoryAllocatedMB || prev?.memoryAllocatedMB,
         startTime: status.startTime || prev?.startTime || Date.now(),
         coin: status.coin || prev?.coin || "USDT",
         network: status.network || prev?.network || "BEP20",
@@ -679,13 +687,15 @@ export default function App() {
           <span className="text-zinc-700 hidden sm:inline">|</span>
           <span className="flex items-center gap-1">
             <Cpu className="w-3 h-3 text-cyan-400" />
-            <span className="text-zinc-500">CPU:</span>
-            <span className="text-zinc-200 font-bold">{miningStatus?.cpuModel || (cpuBrand === "ryzen" ? "AMD Ryzen / EPYC" : "Intel Xeon")}</span>
+            <span className="text-zinc-500">Hardware:</span>
+            <span className="text-zinc-200 font-bold">
+              {miningStatus?.cores || miningStatus?.threads || 2}C/{miningStatus?.threads || 2}T • {miningStatus?.totalMemoryGB || "4.00"} GB RAM ({miningStatus?.memoryAllocatedMB || 2336} MB Active)
+            </span>
           </span>
           <span className="text-zinc-700 hidden sm:inline">|</span>
           <span className="text-emerald-400 font-semibold flex items-center gap-1">
             <Zap className="w-3 h-3 text-amber-400 fill-amber-400" />
-            <span>100% Turbo (Fast RandomX rx/0 • Priority 5 Realtime • All Cores)</span>
+            <span>100% ALL Cores, Threads &amp; Memory Active</span>
           </span>
         </div>
 

